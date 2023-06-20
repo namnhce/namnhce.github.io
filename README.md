@@ -1,133 +1,219 @@
-# AzerothJS
+---
+tags: engineering/devops, devops, blue-green-deployement, deployment-strategy, production-traffic, resiliency, reliability
+author: Nguyen Huu Nguyen
+github_id: nguyennh4522
+date: 2022-02-16
+icy: 10
+---
 
-AzerothJS is an open source blog engine running on static file servers such as Github Pages or any web hosting. 
+**Blue-green** deployment is a software deployment strategy that involves creating two identical environments: one **blue** environment serving production traffic, and another **green** environment that doesn't serve any traffic. Once the **green** environment is fully tested and verified, traffic is switched from the **blue** environment to the **green** environment, making it the new production environment. This approach reduces downtime, improves reliability and resilience, and provides a backup in case of issues.
 
-In short: 100% client-side JavaScript. 
+![[blue-green-deployment-model.gif]]
 
-![](./img/azeroth_screenshot.png)
+## How does blue-green deployment work?
 
-## Live demo
-Check out the [live demo here](http://huytd.github.io/azeroth-js/)
+**Blue-green** deployment is a deployment strategy for software applications that involves maintaining two identical environments: one currently serving production traffic (the **blue** environment), and one that is newly deployed (the **green** environment"). The new version of the application is deployed to the **green** environment, which is tested and monitored. Once it is determined that the **green** environment is working correctly, traffic is routed to it and the **blue** environment is retired. This strategy allows for quick and easy switching between environments, minimizing downtime and reducing the risk of errors or bugs.
 
-## What makes AzerothJS cool?
+## Characteristic
 
-- Super lightweight
-- No installation needed
-- No server side code
-- Made for Github Pages
-- Easy to customization
-- Static HTML Generator
+The following table summarizes the salient features of the **blue-green** strategy compared to other strategies:
 
-## How to use?
+![[bluegreen-compare.png]]
 
-### Run locally
-1. Clone this project to your computer
-2. Start simple HTTP server with Python:
+## Implementing blue-green deployment strategy in Kubernetes
 
-  **Python2**
-  ```
-  python -m SimpleHTTPServer 3000
-  ```
-  **Python3**
-  ```
-  python -m http.server 3000
-  ```  
-3. Your blog now available at [http://localhost:3000](http://localhost:3000)
+1. Preparing
 
-### Use with Github Pages
-1. Create your Github Pages
-2. Clone this project and push it to your Github Pages
-3. Every time you want to write, create a new `*.md` file in `posts` folder and write with your favorite Markdown Editor
-4. Modify `posts/home.md`, list your posts here
-5. Commit and push everything here. Done!
+Before implementing blue-green deployment in Kubernetes, there are a few things you should do to prepare:
 
-### Use with other web host
-1. Clone this project to your computer
-2. Create a new post in `*.md` format and save to `posts` folder
-3. Upload the everything to your web host
-4. Done
+- Set up a Kubernetes cluster with nginx-ingress controller, cert-manager, argo-rollouts
+- Domain for active application and preview application
+- Define application resources:
+    ```
+    .
+    └── app/
+        ├── bluegreen-rollout.yaml
+        ├── ingress.yaml
+        └── service.yaml
+    ```
 
-## Two display mode
-Azeroth has 2 display mode: **Live Markdown** and **Static HTML**.
+2. Implementation
 
-If you point your browser to http://yoursite.com/#/slugged-post-name, **Live Markdown** mode will be used to render HTML content directly from Markdown file.
+To implement blue-green deployment in Kubernetes, you need create `bluegreen-rollout.yaml` file to defines the application resources and the rollout strategy:
 
-One problem of **Live Markdown** is: it's unable to display the content when you share the site on social networks like Facebook or Twitter. To solve this issue, we use **Static HTML**. After generating static HTML content, you can access your post at http://yoursite.com/posts/slugged-post-name
-
-## How to generate Static HTML
-Run this script in your root folder:
+```yaml
+# bluegreen-rollout.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: myapp
+  labels:
+    app: myapp
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: argoproj/rollouts-demo:green
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+  strategy:
+    blueGreen:
+      autoPromotionEnabled: false
+      activeService: myapp
+      previewService: myapp-preview
 
 ```
-node generator.js
+
+`bluegreen-rollout.yaml` defined like a normal deployment file. The only difference is the `strategy` section:
+- `autoPromotionEnabled`: will make the rollout automatically promote the new ReplicaSet to the active service once the new ReplicaSet is healthy. This field is defaulted to true if it is not specified (default: `true`).
+- `activeService`: specifies the service to update with the new template hash at time of promotion. This field is required.
+- `previewService`: specifies the service to update with the new template hash before promotion. This field is optional.
+
+Next, you need to create `ingress.yaml` file and  `service.yaml` file to define the ingress and service resources for the application:
+
+```yaml
+# ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - myapp.bluegreen.xyz
+      secretName: myapp.bluegreen.xyz-tls
+  rules:
+    - host: myapp.bluegreen.xyz
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: myapp
+                port:
+                  name: http
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp-preview
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - myapp-preview.bluegreen.xyz
+      secretName: myapp-preview.bluegreen.xyz-tls
+  rules:
+    - host: myapp-preview.bluegreen.xyz
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: myapp-preview
+                port:
+                  name: http
 ```
 
-The script will automatically convert all `*.md` files in `/posts` folder to `*.html`.
+```yaml
+# service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  labels:
+    app: myapp
+spec:
+  selector:
+    app: myapp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP
 
-Now you can list your HTML pages in `home.md` instead of markdown files.
-
-## How to customize?
-
-### Change code highlighting theme
-The original theme for the code highlighting is `Tomorrow Night`. If you don't like it, there are many pre-installed themes inside `css/highlight` folder. Pick one and replace to `line 6` of `index.html`:
-
-```html
-<link rel="stylesheet" href="./css/highlight/tomorrow-night.css">
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-preview
+  labels:
+    app: myapp
+spec:
+  selector:
+    app: myapp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP
 ```
 
-### Change the font family
-The original font for the blog is `Roboto Slab`. You can change the new font by replacing `line 4` of `index.html`:
+Apply these resources to the cluster:
 
-```html
-<link href='https://fonts.googleapis.com/css?family=Roboto+Slab:400,300&subset=latin,vietnamese' rel='stylesheet' type='text/css'>
+```bash
+kubectl apply -f app/bluegreen-rollout.yaml
+kubectl apply -f app/service.yaml
+kubectl apply -f app/ingress.yaml
 ```
 
-And change the font in `css/theme.css`:
+Now, application is deployed on active environment and you can view it on `myapp.bluegreen.xyz` domain.
 
-```css
-* {
-    font-family: 'Roboto Slab', serif;
-    font-size: 20px;
-    font-weight: 100;
-}
+![[bluegreen-green-application.png]]
+
+We change the image of the application to `argoproj/rollouts-demo:blue` and apply the changes to the cluster:
+
+```yaml
+# bluegreen-rollout.yaml
+...
+      containers:
+        - name: myapp
+          image: argoproj/rollouts-demo:blue
+...
+```
+```bash
+kubectl apply -f app/bluegreen-rollout.yaml
 ```
 
-### Insert your Social links
-There are some social icon links in `footer`, put your own one by edit the `index.html`:
+Argo rollouts will create a new ReplicaSet with the new image and start to rollout the new version of the application to the preview environment. You can view the preview application on `myapp-preview.bluegreen.xyz` domain.
 
-```html
-<div class="footer">
-    <p>Created with <a href="http://github.com/huytd/azeroth-js">azeroth.js</a></p>
-    <div class="social">
-        <a href="#"><i class="icon-facebook-squared"></i></a>
-        <a href="#"><i class="icon-twitter-squared"></i></a>
-        <a href="#"><i class="icon-linkedin-squared"></i></a>
-        <a href="#"><i class="icon-github-squared"></i></a>
-        <a href="#"><i class="icon-mail-alt"></i></a>
-    </div>
-</div>
+![[bluegreen-blue-application.png]]
+
+When the new version of the application is ready, you can promote it to the active environment by running the following command:
+
+```bash
+kubectl argo rollouts promote myapp
 ```
 
-### Night Theme
-Change your CSS link in both the `index.html` and `template.html` to this:
-```html
-<link href="./css/night-theme.css" rel="stylesheet" type="text/css">
-```
+Now, the application is deployed on active environment and you can view it on `myapp.bluegreen.xyz` domain.
 
-### Google Analytics
+## Conclusion
 
-In the end of `index.html` and `template.html`, there is a line:
+Implementing blue-green deployment in Kubernetes requires preparation, including setting up a Kubernetes cluster, containerizing the application, defining application resources in manifests, setting up a CI/CD pipeline, and implementing monitoring and logging. However, once set up, blue-green deployment can help increase the reliability, availability, and quality of the deployed application. By minimizing downtime, reducing risks, and ensuring the smooth transition to new versions of the application, blue-green deployment can ultimately help organizations deliver more value to their customers.
 
-```js
-ga('create', 'Insert-Your-GA-ID-Here', 'auto');
-```
+## References
 
-Replace `Insert-Your-GA-ID-Here` with your Google Analytics ID to start monitoring your blog.
-
-# Uhmmm, you made it, but did you use it?
-
-Yes, I'm using it for my personal blog (http://huytd.github.io/), it's in Vietnamese.
-
-If you prefer to read English version, Goole Translate can help (https://translate.google.com/translate?sl=auto&tl=en&js=y&prev=_t&hl=en&ie=UTF-8&u=http%3A%2F%2Fhuytd.github.io%2F&edit-text=)
-
-# License
-[MIT](https://opensource.org/licenses/MIT)
+- https://www.redhat.com/en/topics/devops/what-is-blue-green-deployment
+- https://cloud.google.com/architecture/application-deployment-and-testing-strategies
+- https://argoproj.github.io/argo-rollouts/
+- https://viblo.asia/p/kubernetes-practice-english-automating-bluegreen-deployment-with-argo-rollouts-GAWVpoGaL05
+1
